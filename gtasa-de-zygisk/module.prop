@@ -1,0 +1,6 @@
+id=gtasa_de_zygisk
+name=GTASA DE Zygisk
+version=1.0.0
+versionCode=1
+author=Grok
+description=In-world plugin loader for GTASA DE

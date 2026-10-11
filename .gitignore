@@ -1,0 +1,4 @@
+# Build products and local disassembly
+gtasa-de-zygisk/dist/
+.disasm/
+__pycache__/
