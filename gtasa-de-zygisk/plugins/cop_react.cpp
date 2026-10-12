@@ -109,24 +109,18 @@ constexpr uint32_t kSlotHandoffBranch = 0x14000025u;
 constexpr uintptr_t kChaseStars = 0x531f92c;
 constexpr uint32_t kChaseStarsCbnz = 0x35000728u;
 // On foot, stars >= 3, and the cop count still under the cap: these branches
-// respawn a cop about 42.5-50.5 m away. They join the normal ped path instead.
-// The same generator ORs a second bit when its on-foot cop count is 0 and then
-// stores ped type 6. Clearing that combined flag keeps the ped a civilian.
-constexpr uintptr_t kCopPedFlag = 0x55f5d90;
-constexpr uint32_t kCopPedOrr = 0x2a0902c8u;
-constexpr uint32_t kCopPedClear = 0x2a1f03e8u;
-// The type picker writes ped type 6 when its switch is set. Skip that roll.
-constexpr uintptr_t kCopPicker = 0x55f38bc;
-constexpr uint32_t kCopPickerCbz = 0x34000248u;
-constexpr uint32_t kCopPickerSkip = 0x14000012u;
+// place a cop on a path node about 42.5-50.5 m away. That node can be an alley
+// or a road. Drop the attempt instead of placing anyone. The ordinary ped path
+// and the ped-type picker still assign cop type on their own.
 constexpr uintptr_t kRefillFar = 0x55f5bd4;
 constexpr uint32_t kRefillFarGe = 0x54002e2au;
-constexpr uint32_t kRefillFarNormal = 0x5400056au;
+constexpr uint32_t kRefillFarDrop = 0x54001eeau;
 constexpr uintptr_t kRefillNear = 0x55f5c0c;
 constexpr uint32_t kRefillNearLs = 0x54002c69u;
-constexpr uint32_t kRefillNearNormal = 0x540003a9u;
+constexpr uint32_t kRefillNearDrop = 0x54001d29u;
 constexpr uintptr_t kRefillFull = 0x55f5c7c;
 constexpr uint32_t kRefillFullGe = 0x540028eau;
+constexpr uint32_t kRefillFullDrop = 0x540019aau;
 constexpr uintptr_t kFindPlayer = 0x5482ce4;
 constexpr uintptr_t kClearPursuit = 0x57c13e4;
 constexpr uintptr_t kCanJoinPursuit = 0x54aad34;
@@ -164,9 +158,6 @@ constexpr uintptr_t kRandCarSpawnNext = 0x531e5b4;
 constexpr uintptr_t kChaseModel = 0x532198c;
 constexpr uint32_t kChaseModelBl = 0x97fffa38u;
 constexpr uintptr_t kChaseModelNext = 0x5321990;
-constexpr uintptr_t kChaseSpawn = 0x53219b0;
-constexpr uint32_t kChaseSpawnBl = 0x97ffeafeu;
-constexpr uintptr_t kChaseSpawnNext = 0x53219b4;
 // A water node rolls on its own when model selection did not already roll this slot.
 // A hit becomes the police boat. A miss there does not roll again.
 constexpr uintptr_t kWaterTest = 0x531e2c8;
@@ -244,19 +235,12 @@ DamageFn g_damage_orig = nullptr;
 using KillCarFn = void (*)(uint8_t *, uint8_t *, float, int);
 KillCarFn g_kill_car_orig = nullptr;
 float g_clue = 0.f;
-float g_clue_speed = 0.f;
-float g_clue_goal = 0.f;
 int g_cop_kills = 0;
 uint8_t *g_killed_units[kUnitCap] = {};
-int g_fall_kills = -1;
-int g_fall_stars = -1;
-uint32_t g_clue_ms = 0;
-uint32_t g_report_ms = 0;
+int g_report_weight = 0;
 uint32_t g_next_extra_ms = 0;
 int g_pending_model = -1;
 bool g_slot_rolled = false;
-uint8_t *g_natural[8] = {};
-int g_natural_count = 0;
 bool g_road_placed = false;
 bool g_road_entry_patched = false;
 uint8_t *g_road_page = nullptr;
@@ -268,7 +252,6 @@ int g_extra_count = 0;
 bool g_choose_patched = false;
 bool g_rand_spawn_patched = false;
 bool g_chase_model_patched = false;
-bool g_chase_spawn_patched = false;
 uint8_t *g_extra_page = nullptr;
 bool g_unarmed_patched = false;
 uint32_t g_unarmed_saved = 0;
@@ -281,8 +264,6 @@ bool g_chase_patched = false;
 bool g_refill_far_patched = false;
 bool g_refill_near_patched = false;
 bool g_refill_full_patched = false;
-bool g_cop_ped_patched = false;
-bool g_cop_picker_patched = false;
 bool g_water_patched = false;
 bool g_abort_patched = false;
 bool g_pursue_patched = false;
@@ -1062,7 +1043,7 @@ void chase_ignored(uint8_t *cop, uint8_t *shooter) {
         return;
     }
     if (install_chase(cop, best)) {
-        __android_log_print(ANDROID_LOG_INFO, kTag, "cop-react in-car heard");
+        __android_log_print(ANDROID_LOG_INFO, kTag, "cop-react kept shot");
     }
 }
 
@@ -1075,13 +1056,11 @@ uint8_t *build_ignore_stub(uintptr_t) {
     const uintptr_t skip = g_host->base + kIgnoreSkip;
     const uintptr_t keep = g_host->base + kIgnoreKeep;
     const uint32_t code[] = {
-        0x35000374u,  // cbnz w20, store
+        0x35000334u,  // cbnz w20, store
         0x71003edfu,  // cmp w22, #15
-        0x540002e1u,  // b.ne drop
+        0x540002a1u,  // b.ne drop
         0xf9400670u,  // ldr x16, [x19, #8]
-        0xb40002b0u,  // cbz x16, drop
-        0x3958d611u,  // ldrb w17, [x16, #0x635]
-        0x36000271u,  // tbz w17, #0, drop
+        0xb4000270u,  // cbz x16, drop
         0xb947e211u,  // ldr w17, [x16, #0x7e0]
         0x71001a3fu,  // cmp w17, #6
         0x54000201u,  // b.ne drop
@@ -1107,10 +1086,10 @@ uint8_t *build_ignore_stub(uintptr_t) {
         0xd503201fu,
     };
     std::memcpy(page, code, sizeof(code));
-    std::memcpy(page + 0x78, &chase, sizeof(chase));
-    std::memcpy(page + 0x80, &skip, sizeof(skip));
-    std::memcpy(page + 0x88, &keep, sizeof(keep));
-    __builtin___clear_cache(reinterpret_cast<char *>(page), reinterpret_cast<char *>(page) + 0x90);
+    std::memcpy(page + 0x70, &chase, sizeof(chase));
+    std::memcpy(page + 0x78, &skip, sizeof(skip));
+    std::memcpy(page + 0x80, &keep, sizeof(keep));
+    __builtin___clear_cache(reinterpret_cast<char *>(page), reinterpret_cast<char *>(page) + 0x88);
     return page;
 }
 
@@ -1523,40 +1502,24 @@ int pursuit_units(uint8_t *wanted) {
 }
 
 void refresh_road_placed();
-float clue_target(int units);
+float report_share(int stars);
 
 void update_clue(uint8_t *wanted) {
-    const uint32_t now = game_ms();
-    if (g_clue_ms == 0) {
-        g_clue_ms = now;
-    }
-    float dt = static_cast<float>(now - g_clue_ms) / 1000.f;
-    g_clue_ms = now;
-    if (dt > 1.f) {
-        dt = 0.f;
-    }
     const int stars = wanted == nullptr ? 0 : *reinterpret_cast<int *>(wanted + kWantedStars);
     if (stars <= 0) {
         g_cop_kills = 0;
-        g_report_ms = 0;
+        g_report_weight = 0;
+        g_clue = 0.f;
         g_next_extra_ms = 0;
+        return;
     }
-    const int units = wanted == nullptr ? 0 : pursuit_units(wanted);
-    const float target = clue_target(units);
-    const bool rising = target > g_clue;
-    if (target != g_clue_goal || (!rising && (g_fall_kills != g_cop_kills || g_fall_stars != stars))) {
-        g_clue_goal = target;
-        g_fall_kills = g_cop_kills;
-        g_fall_stars = stars;
-        const float heat = 1.f + static_cast<float>(g_cop_kills) + 0.5f * static_cast<float>(stars > 0 ? stars : 0);
-        const float seconds = rising ? 3.f : 10.f * heat;
-        g_clue_speed = (target - g_clue) / seconds;
+    const int units = pursuit_units(wanted);
+    const int seen = units > kUnitCap ? kUnitCap : units;
+    float sum = 0.25f * static_cast<float>(seen) + report_share(stars);
+    if (sum > 1.f) {
+        sum = 1.f;
     }
-    g_clue += g_clue_speed * dt;
-    if ((g_clue_speed > 0.f && g_clue > g_clue_goal) || (g_clue_speed < 0.f && g_clue < g_clue_goal)) {
-        g_clue = g_clue_goal;
-        g_clue_speed = 0.f;
-    }
+    g_clue = sum;
 }
 
 void on_wanted_update(uint8_t *wanted) {
@@ -1598,36 +1561,26 @@ float star_ceiling(int stars) {
         return 0.f;
     }
     if (stars == 2) {
-        return 0.15f;
+        return 0.18f;
     }
     if (stars == 3) {
-        return 0.20f;
+        return 0.24f;
     }
     if (stars == 4) {
-        return 0.25f;
+        return 0.30f;
     }
-    return 0.30f;
+    if (stars == 5) {
+        return 0.36f;
+    }
+    return 0.42f;
 }
 
 // Clue, stars, and kills each run from 0 to 1. Their sum may pass 1.
 // Only 1 counts, and that maps the next roll's wait from 8s down to 5s.
 uint32_t extra_gap_ms(int stars) {
-    float clue = g_clue;
-    if (clue < 0.f) {
-        clue = 0.f;
-    }
-    if (clue > 1.f) {
-        clue = 1.f;
-    }
-    float star_part = static_cast<float>(stars > 0 ? stars : 0) / 6.f;
-    if (star_part > 1.f) {
-        star_part = 1.f;
-    }
+    float star_part = static_cast<float>(stars) / 6.f;
     float kill_part = static_cast<float>(g_cop_kills) / static_cast<float>(kUnitCap);
-    if (kill_part > 1.f) {
-        kill_part = 1.f;
-    }
-    float heat = clue + star_part + kill_part;
+    float heat = g_clue + star_part + kill_part;
     if (heat > 1.f) {
         heat = 1.f;
     }
@@ -1654,6 +1607,15 @@ void arm_extra_gap() {
     g_next_extra_ms = game_ms() + extra_gap_ms(stars);
 }
 
+bool police_heli_up();
+
+// A roadblock or a police helicopter makes this roll use a full clue.
+// The meter itself does not gain a share from either of them.
+bool response_full() {
+    refresh_road_placed();
+    return g_road_placed || (g_host != nullptr && police_heli_up());
+}
+
 float roll_chance(int stars, float clue, int have, int vanilla, int cap) {
     if (cap <= 0 || have >= cap) {
         return 0.f;
@@ -1664,7 +1626,8 @@ float roll_chance(int stars, float clue, int have, int vanilla, int cap) {
     if (ceiling <= 0.f) {
         return 0.f;
     }
-    return bonus ? ceiling * clue : ceiling * clue * room;
+    const float used = response_full() ? 1.f : clue;
+    return bonus ? ceiling * used : ceiling * used * room;
 }
 
 bool special_present(int model) {
@@ -1699,25 +1662,23 @@ bool police_heli_up() {
     return false;
 }
 
-// Sight fills the meter. A roadblock, a crime report, and a police helicopter
-// only make up the share that witnesses have not already filled.
-float clue_target(int units) {
-    refresh_road_placed();
-    const int seen = units > kUnitCap ? kUnitCap : units;
-    float sum = 0.25f * static_cast<float>(seen);
-    if (g_road_placed) {
-        sum += 0.25f;
+// Kills and stars each run from 0 to 1, then each fills half of the bonus.
+// The bonus stops at 1, so the zone stops at 2.
+float report_zone(int stars) {
+    float kill_part = static_cast<float>(g_cop_kills) / static_cast<float>(kUnitCap);
+    float star_part = static_cast<float>(stars) / 6.f;
+    float added = 0.5f * kill_part + 0.5f * star_part;
+    return 1.f + added;
+}
+
+// The heaviest recorded crime is 400 and, before the zone, fills half the
+// meter. The zone uses the current kills and wanted level.
+float report_share(int stars) {
+    if (g_report_weight <= 0) {
+        return 0.f;
     }
-    if (g_report_ms != 0 && game_ms() < g_report_ms) {
-        sum += 0.25f;
-    }
-    if (g_host != nullptr && police_heli_up()) {
-        sum += 0.50f;
-    }
-    if (sum > 1.f) {
-        sum = 1.f;
-    }
-    return sum;
+    const float base = static_cast<float>(g_report_weight) * (0.50f / 400.f);
+    return base * report_zone(stars);
 }
 
 bool water_roll() {
@@ -1765,6 +1726,16 @@ int pick_extra_model(int stars) {
     return model;
 }
 
+int crime_weight(unsigned crime) {
+    static constexpr int kWeight[] = {
+        5, 45, 30, 80, 15, 10, 5, 5, 18, 80, 400, 20, 80, 20, 400, 25, 35, 100, 70, 2, 2,
+    };
+    if (crime < 2 || crime - 2 >= sizeof(kWeight) / sizeof(kWeight[0])) {
+        return 0;
+    }
+    return kWeight[crime - 2];
+}
+
 void on_report_crime(unsigned crime, uint8_t *ped) {
     if (!g_active || g_host == nullptr || ped == nullptr || crime == 0) {
         return;
@@ -1772,7 +1743,10 @@ void on_report_crime(unsigned crime, uint8_t *ped) {
     if (*reinterpret_cast<int *>(ped + kPedType) > 1) {
         return;
     }
-    g_report_ms = game_ms() + 3000;
+    const int weight = crime_weight(crime);
+    if (weight > g_report_weight) {
+        g_report_weight = weight;
+    }
 }
 
 int extra_model() {
@@ -1784,13 +1758,12 @@ int extra_model() {
     if (!g_active || g_host == nullptr) {
         return -1;
     }
-    prune_cars(g_natural, &g_natural_count, nullptr);
     prune_cars(g_extra, &g_extra_count, g_extra_model);
-    if (g_clue <= 0.f || (g_clue_goal <= 0.f && g_natural_count <= 0)) {
-        return -1;
-    }
     using WantedLookup = uint8_t *(*)(int);
     auto *wanted = reinterpret_cast<WantedLookup>(g_host->base + kFindWanted)(0);
+    if (!response_full() && g_clue <= 0.f) {
+        return -1;
+    }
     const int stars = wanted == nullptr ? 0 : *reinterpret_cast<int *>(wanted + kWantedStars);
     int cap = 0;
     int have = 0;
@@ -1805,21 +1778,6 @@ int extra_model() {
     g_pending_model = model;
     __android_log_print(ANDROID_LOG_INFO, kTag, "cop-react extra car");
     return model;
-}
-
-void note_natural(uint8_t *veh) {
-    if (!vehicle_ok(veh)) {
-        return;
-    }
-    for (int i = 0; i < g_natural_count; ++i) {
-        if (g_natural[i] == veh) {
-            return;
-        }
-    }
-    if (g_natural_count >= 8) {
-        return;
-    }
-    g_natural[g_natural_count++] = veh;
 }
 
 bool road_dispatch_active() {
@@ -1889,8 +1847,6 @@ uint8_t *build_extra_page() {
     const uintptr_t created = g_host->base + kGetNewVehicle;
     const uintptr_t extra_fn = reinterpret_cast<uintptr_t>(note_extra);
     const uintptr_t extra_back = g_host->base + kRandCarSpawnNext;
-    const uintptr_t natural_fn = reinterpret_cast<uintptr_t>(note_natural);
-    const uintptr_t natural_back = g_host->base + kChaseSpawnNext;
     const uintptr_t choose = g_host->base + kChoosePoliceModel;
     const uintptr_t fix_fn = reinterpret_cast<uintptr_t>(regularize_chase_model);
     const uintptr_t fix_back = g_host->base + kChaseModelNext;
@@ -1911,20 +1867,16 @@ uint8_t *build_extra_page() {
     std::memcpy(page + 0x90, &created, sizeof(created));
     std::memcpy(page + 0x98, &extra_fn, sizeof(extra_fn));
     std::memcpy(page + 0xa0, &extra_back, sizeof(extra_back));
-    std::memcpy(page + 0xb0, note, sizeof(note));
-    std::memcpy(page + 0xe0, &created, sizeof(created));
-    std::memcpy(page + 0xe8, &natural_fn, sizeof(natural_fn));
-    std::memcpy(page + 0xf0, &natural_back, sizeof(natural_back));
-    std::memcpy(page + 0x100, fix, sizeof(fix));
-    std::memcpy(page + 0x120, &choose, sizeof(choose));
-    std::memcpy(page + 0x128, &fix_fn, sizeof(fix_fn));
-    std::memcpy(page + 0x130, &fix_back, sizeof(fix_back));
-    std::memcpy(page + 0x140, water, sizeof(water));
-    std::memcpy(page + 0x188, &water_fn, sizeof(water_fn));
-    std::memcpy(page + 0x190, &water_cop, sizeof(water_cop));
-    std::memcpy(page + 0x198, &water_civ, sizeof(water_civ));
-    std::memcpy(page + 0x1a0, &water_land, sizeof(water_land));
-    std::memcpy(page + 0x1a8, &water_cop, sizeof(water_cop));
+    std::memcpy(page + 0xb0, fix, sizeof(fix));
+    std::memcpy(page + 0xd0, &choose, sizeof(choose));
+    std::memcpy(page + 0xd8, &fix_fn, sizeof(fix_fn));
+    std::memcpy(page + 0xe0, &fix_back, sizeof(fix_back));
+    std::memcpy(page + 0xf0, water, sizeof(water));
+    std::memcpy(page + 0x138, &water_fn, sizeof(water_fn));
+    std::memcpy(page + 0x140, &water_cop, sizeof(water_cop));
+    std::memcpy(page + 0x148, &water_civ, sizeof(water_civ));
+    std::memcpy(page + 0x150, &water_land, sizeof(water_land));
+    std::memcpy(page + 0x158, &water_cop, sizeof(water_cop));
     const uint32_t plain[] = {
         0x5400014du, 0xa9bf7bfdu, 0x58000190u, 0xd63f0200u, 0xa8c17bfdu, 0x7100001fu, 0x540000cdu, 0x2a0003f4u,
         0x2a1f03fbu, 0xb81a03bbu, 0x580000d0u, 0xd61f0200u, 0x580000d0u, 0xd61f0200u,
@@ -1932,11 +1884,11 @@ uint8_t *build_extra_page() {
     const uintptr_t plain_fn = reinterpret_cast<uintptr_t>(civilian_model);
     const uintptr_t plain_keep = g_host->base + kCopClassKeep;
     const uintptr_t plain_drop = g_host->base + kCopClassDrop;
-    std::memcpy(page + 0x1c0, plain, sizeof(plain));
-    std::memcpy(page + 0x1f8, &plain_fn, sizeof(plain_fn));
-    std::memcpy(page + 0x200, &plain_keep, sizeof(plain_keep));
-    std::memcpy(page + 0x208, &plain_drop, sizeof(plain_drop));
-    __builtin___clear_cache(reinterpret_cast<char *>(page), reinterpret_cast<char *>(page) + 0x210);
+    std::memcpy(page + 0x170, plain, sizeof(plain));
+    std::memcpy(page + 0x1a8, &plain_fn, sizeof(plain_fn));
+    std::memcpy(page + 0x1b0, &plain_keep, sizeof(plain_keep));
+    std::memcpy(page + 0x1b8, &plain_drop, sizeof(plain_drop));
+    __builtin___clear_cache(reinterpret_cast<char *>(page), reinterpret_cast<char *>(page) + 0x1c0);
     return page;
 }
 
@@ -1958,7 +1910,6 @@ bool set_extra(bool enable) {
     const uintptr_t choose = g_host->base + kChooseModelSite;
     const uintptr_t rand_spawn = g_host->base + kRandCarSpawn;
     const uintptr_t chase_model = g_host->base + kChaseModel;
-    const uintptr_t chase_spawn = g_host->base + kChaseSpawn;
     const uintptr_t water = g_host->base + kWaterTest;
     const uintptr_t abort_at = g_host->base + kCopClassAbort;
     if (enable) {
@@ -1966,7 +1917,6 @@ bool set_extra(bool enable) {
             if (*reinterpret_cast<uint32_t *>(choose) != kChooseModelSub ||
                 *reinterpret_cast<uint32_t *>(rand_spawn) != kRandCarSpawnBl ||
                 *reinterpret_cast<uint32_t *>(chase_model) != kChaseModelBl ||
-                *reinterpret_cast<uint32_t *>(chase_spawn) != kChaseSpawnBl ||
                 *reinterpret_cast<uint32_t *>(water) != kWaterTbnz ||
                 *reinterpret_cast<uint32_t *>(abort_at) != kCopClassAbortGt) {
                 return false;
@@ -1985,31 +1935,22 @@ bool set_extra(bool enable) {
             return false;
         }
         g_rand_spawn_patched = true;
-        if (!write_branch(chase_spawn, g_extra_page + 0xb0)) {
-            restore_extra_word(&g_rand_spawn_patched, rand_spawn, kRandCarSpawnBl);
-            restore_extra_word(&g_choose_patched, choose, kChooseModelSub);
-            return false;
-        }
-        g_chase_spawn_patched = true;
-        if (!write_branch(chase_model, g_extra_page + 0x100)) {
-            restore_extra_word(&g_chase_spawn_patched, chase_spawn, kChaseSpawnBl);
+        if (!write_branch(chase_model, g_extra_page + 0xb0)) {
             restore_extra_word(&g_rand_spawn_patched, rand_spawn, kRandCarSpawnBl);
             restore_extra_word(&g_choose_patched, choose, kChooseModelSub);
             return false;
         }
         g_chase_model_patched = true;
-        if (!write_branch(water, g_extra_page + 0x140)) {
+        if (!write_branch(water, g_extra_page + 0xf0)) {
             restore_extra_word(&g_chase_model_patched, chase_model, kChaseModelBl);
-            restore_extra_word(&g_chase_spawn_patched, chase_spawn, kChaseSpawnBl);
             restore_extra_word(&g_rand_spawn_patched, rand_spawn, kRandCarSpawnBl);
             restore_extra_word(&g_choose_patched, choose, kChooseModelSub);
             return false;
         }
         g_water_patched = true;
-        if (!write_branch(abort_at, g_extra_page + 0x1c0)) {
+        if (!write_branch(abort_at, g_extra_page + 0x170)) {
             restore_extra_word(&g_water_patched, water, kWaterTbnz);
             restore_extra_word(&g_chase_model_patched, chase_model, kChaseModelBl);
-            restore_extra_word(&g_chase_spawn_patched, chase_spawn, kChaseSpawnBl);
             restore_extra_word(&g_rand_spawn_patched, rand_spawn, kRandCarSpawnBl);
             restore_extra_word(&g_choose_patched, choose, kChooseModelSub);
             return false;
@@ -2019,11 +1960,10 @@ bool set_extra(bool enable) {
     }
     const bool choose_ok = restore_extra_word(&g_choose_patched, choose, kChooseModelSub);
     const bool rand_ok = restore_extra_word(&g_rand_spawn_patched, rand_spawn, kRandCarSpawnBl);
-    const bool spawn_ok = restore_extra_word(&g_chase_spawn_patched, chase_spawn, kChaseSpawnBl);
     const bool model_ok = restore_extra_word(&g_chase_model_patched, chase_model, kChaseModelBl);
     const bool water_ok = restore_extra_word(&g_water_patched, water, kWaterTbnz);
     const bool abort_ok = restore_extra_word(&g_abort_patched, abort_at, kCopClassAbortGt);
-    return choose_ok && rand_ok && spawn_ok && model_ok && water_ok && abort_ok;
+    return choose_ok && rand_ok && model_ok && water_ok && abort_ok;
 }
 
 uint8_t *build_road_trigger() {
@@ -2114,12 +2054,10 @@ bool set_crime(bool enable) {
 bool set_spawn(bool enable) {
     const bool slot = exchange_word(enable, kSlotHandoff, kSlotHandoffMov, kSlotHandoffBranch, &g_slot_patched);
     const bool chase = exchange_word(enable, kChaseStars, kChaseStarsCbnz, kNop, &g_chase_patched);
-    const bool far = exchange_word(enable, kRefillFar, kRefillFarGe, kRefillFarNormal, &g_refill_far_patched);
-    const bool near = exchange_word(enable, kRefillNear, kRefillNearLs, kRefillNearNormal, &g_refill_near_patched);
-    const bool full = exchange_word(enable, kRefillFull, kRefillFullGe, kNop, &g_refill_full_patched);
-    const bool ped = exchange_word(enable, kCopPedFlag, kCopPedOrr, kCopPedClear, &g_cop_ped_patched);
-    const bool picker = exchange_word(enable, kCopPicker, kCopPickerCbz, kCopPickerSkip, &g_cop_picker_patched);
-    return slot && chase && far && near && full && ped && picker;
+    const bool far = exchange_word(enable, kRefillFar, kRefillFarGe, kRefillFarDrop, &g_refill_far_patched);
+    const bool near = exchange_word(enable, kRefillNear, kRefillNearLs, kRefillNearDrop, &g_refill_near_patched);
+    const bool full = exchange_word(enable, kRefillFull, kRefillFullGe, kRefillFullDrop, &g_refill_full_patched);
+    return slot && chase && far && near && full;
 }
 
 uint8_t *build_pursuit_page() {
