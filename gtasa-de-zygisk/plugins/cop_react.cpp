@@ -99,11 +99,10 @@ constexpr uintptr_t kShotSource = 0x54dd57c;
 constexpr uint32_t kShotSourceLdr = 0xf9400c34u;
 constexpr uintptr_t kShotContinue = 0x54dd580;
 constexpr uintptr_t kShotKeep = 0x54ddd1c;
-// Wanted level 2 and above hands the next traffic slot to a police car.
-// That slot stays a normal car. CreatePoliceChase still calls ChoosePoliceCarModel itself.
+// The game is about to force this traffic slot into a police car. Roll that slot.
+// A miss continues into ordinary model selection. CreatePoliceChase is separate.
 constexpr uintptr_t kSlotHandoff = 0x531dfbc;
 constexpr uint32_t kSlotHandoffMov = 0x2a1f03e0u;
-constexpr uint32_t kSlotHandoffBranch = 0x14000025u;
 // CreatePoliceChase is skipped while stars are not zero. Drop that skip so a wanted
 // player still gets the game's own chase cars.
 constexpr uintptr_t kChaseStars = 0x531f92c;
@@ -137,7 +136,7 @@ constexpr uintptr_t kWantedResponse = 0x54e3e30;
 constexpr uintptr_t kReportCrime = 0x5433eb0;
 constexpr uint32_t kReportCrimeSub = 0xd101c3ffu;
 constexpr uintptr_t kReportCrimeNext = 0x5433eb4;
-// Extra cars are rolled when a normal traffic car is about to be created.
+// Ordinary model selection. A rejected police slot continues here.
 constexpr uintptr_t kChooseModelSite = 0x531e050;
 constexpr uint32_t kChooseModelSub = 0xd10183a0u;
 constexpr uintptr_t kChooseModelNext = 0x531e054;
@@ -158,13 +157,6 @@ constexpr uintptr_t kRandCarSpawnNext = 0x531e5b4;
 constexpr uintptr_t kChaseModel = 0x532198c;
 constexpr uint32_t kChaseModelBl = 0x97fffa38u;
 constexpr uintptr_t kChaseModelNext = 0x5321990;
-// A water node rolls on its own when model selection did not already roll this slot.
-// A hit becomes the police boat. A miss there does not roll again.
-constexpr uintptr_t kWaterTest = 0x531e2c8;
-constexpr uint32_t kWaterTbnz = 0x373800b3u;
-constexpr uintptr_t kWaterLand = 0x531e2cc;
-constexpr uintptr_t kWaterCop = 0x531e2dc;
-constexpr uintptr_t kWaterCiv = 0x531e30c;
 // Placing a wanted roadblock is the nearby-dispatch mark. The game bool stays
 // set while that dispatch is running, and is cleared when it stops.
 constexpr uintptr_t kRoadEntry = 0x53a49d0;
@@ -183,22 +175,16 @@ constexpr uintptr_t kHeliPool = 0xa8b8610;
 constexpr int kHeliBytes = 0xdb8;
 constexpr int kModelIndex = 0x3a;
 constexpr int kPoliceHeliModel = 497;
+// Camera generation scale: *(*(this + 0) + 0x170) + 0x3c4. Ordinary cars stay within 170 times it.
+constexpr uintptr_t kCameraRoot = 0xa8afdf8;
 constexpr uintptr_t kFindWanted = 0x548ac30;
-constexpr uintptr_t kGameTimer = 0xaae2404;
 constexpr uintptr_t kWantedUpdate = 0x54a9580;
-constexpr uintptr_t kGenerateDamage = 0x5856268;
-constexpr uintptr_t kKillPedWithCar = 0x55b21ac;
+constexpr int kWantedPoints = 0;
+constexpr int kWantedPointCap = 4600;
 constexpr int kWantedStars = 0x2c;
 constexpr int kPursuitCount = 0x18;
-constexpr int kMaxPursuit = 0x19;
 constexpr int kMaxCopCars = 0x1a;
 constexpr uintptr_t kLawCars = 0xa8b86d8;
-// CWanted keeps up to ten pursuit cops at this stride. ClearPursuit nulls a slot
-// without packing the array, so the count byte is not a dense prefix.
-constexpr int kPursuitSlots = 0x2b8;
-constexpr int kPursuitSlotCount = 10;
-// Sight fills at this many units. The same many killed units stretch the fall.
-constexpr int kUnitCap = 4;
 
 const GtasaHost *g_host = nullptr;
 bool g_patched = false;
@@ -230,17 +216,12 @@ using WantedFn = void (*)(uint8_t *, uint8_t *, uint8_t *, uint8_t *);
 WantedFn g_wanted_orig = nullptr;
 using WantedUpdateFn = void (*)(uint8_t *);
 WantedUpdateFn g_wanted_update_orig = nullptr;
-using DamageFn = void (*)(uint8_t *, uint8_t *, uint8_t *, int, int, int, int);
-DamageFn g_damage_orig = nullptr;
-using KillCarFn = void (*)(uint8_t *, uint8_t *, float, int);
-KillCarFn g_kill_car_orig = nullptr;
-float g_clue = 0.f;
-int g_cop_kills = 0;
-uint8_t *g_killed_units[kUnitCap] = {};
 int g_report_weight = 0;
-uint32_t g_next_extra_ms = 0;
+bool g_scene_open = false;
+bool g_search_have = false;
+float g_search_x = 0.f;
+float g_search_y = 0.f;
 int g_pending_model = -1;
-bool g_slot_rolled = false;
 bool g_road_placed = false;
 bool g_road_entry_patched = false;
 uint8_t *g_road_page = nullptr;
@@ -249,7 +230,6 @@ uint8_t *g_crime_page = nullptr;
 uint8_t *g_extra[8] = {};
 int g_extra_model[8] = {};
 int g_extra_count = 0;
-bool g_choose_patched = false;
 bool g_rand_spawn_patched = false;
 bool g_chase_model_patched = false;
 uint8_t *g_extra_page = nullptr;
@@ -264,7 +244,6 @@ bool g_chase_patched = false;
 bool g_refill_far_patched = false;
 bool g_refill_near_patched = false;
 bool g_refill_full_patched = false;
-bool g_water_patched = false;
 bool g_abort_patched = false;
 bool g_pursue_patched = false;
 bool g_control_patched = false;
@@ -1390,10 +1369,6 @@ void prune_cars(uint8_t **list, int *count, int *models) {
     *count = kept;
 }
 
-uint32_t game_ms() {
-    return *reinterpret_cast<uint32_t *>(g_host->base + kGameTimer);
-}
-
 uint32_t mix_rand() {
     static uint32_t state = 0x6d2b79f5u;
     state ^= state << 13;
@@ -1414,220 +1389,60 @@ int regularize_chase_model(int model) {
     return model;
 }
 
-bool player_caused(uint8_t *attacker) {
-    uint8_t *player = find_player();
-    if (player == nullptr || attacker == nullptr) {
-        return false;
-    }
-    if (attacker == player) {
-        return true;
-    }
-    if ((attacker[0x6a] & 7) != 2) {
-        return false;
-    }
-    auto *driver = *reinterpret_cast<uint8_t **>(attacker + 0x6a8);
-    return driver == player;
-}
-
-void note_cop_kill(uint8_t *cop) {
-    bool leader = false;
-    uint8_t *unit = unit_leader(cop, &leader);
-    if (!leader) {
-        return;
-    }
-    for (int i = 0; i < g_cop_kills; ++i) {
-        if (g_killed_units[i] == unit) {
-            return;
-        }
-    }
-    if (g_cop_kills >= kUnitCap) {
-        return;
-    }
-    g_killed_units[g_cop_kills++] = unit;
-}
-
-void note_if_cop_killed(uint8_t *ped, float before, uint8_t *cause) {
-    if (!g_active || ped == nullptr) {
-        return;
-    }
-    const float after = *reinterpret_cast<float *>(ped + 0x76c);
-    if (before > 0.f && after <= 0.f && *reinterpret_cast<int *>(ped + kPedType) == kCopType &&
-        player_caused(cause)) {
-        note_cop_kill(ped);
-    }
-}
-
-void on_damage(uint8_t *weapon, uint8_t *victim, uint8_t *attacker, int kind, int unknown, int piece,
-               int direction) {
-    const float before = victim == nullptr ? 1.f : *reinterpret_cast<float *>(victim + 0x76c);
-    if (g_damage_orig != nullptr) {
-        g_damage_orig(weapon, victim, attacker, kind, unknown, piece, direction);
-    }
-    note_if_cop_killed(victim, before, attacker);
-}
-
-void on_kill_car(uint8_t *ped, uint8_t *vehicle, float impulse, int unknown) {
-    const float before = ped == nullptr ? 1.f : *reinterpret_cast<float *>(ped + 0x76c);
-    if (g_kill_car_orig != nullptr) {
-        g_kill_car_orig(ped, vehicle, impulse, unknown);
-    }
-    note_if_cop_killed(ped, before, vehicle);
-}
-
-// An on-foot cop is one unit. Everyone in the same car shares the driver's unit.
-int pursuit_units(uint8_t *wanted) {
-    uint8_t *seen[kPursuitSlotCount];
-    int count = 0;
-    for (int i = 0; i < kPursuitSlotCount; ++i) {
-        auto *cop = *reinterpret_cast<uint8_t **>(wanted + kPursuitSlots + i * 8);
-        if (cop == nullptr) {
-            continue;
-        }
-        uint8_t *unit = unit_leader(cop);
-        if (unit == nullptr) {
-            continue;
-        }
-        bool found = false;
-        for (int j = 0; j < count; ++j) {
-            if (seen[j] == unit) {
-                found = true;
-            }
-        }
-        if (found) {
-            continue;
-        }
-        seen[count++] = unit;
-    }
-    return count;
-}
-
 void refresh_road_placed();
-float report_share(int stars);
-
-void update_clue(uint8_t *wanted) {
-    const int stars = wanted == nullptr ? 0 : *reinterpret_cast<int *>(wanted + kWantedStars);
-    if (stars <= 0) {
-        g_cop_kills = 0;
-        g_report_weight = 0;
-        g_clue = 0.f;
-        g_next_extra_ms = 0;
-        return;
-    }
-    const int units = pursuit_units(wanted);
-    const int seen = units > kUnitCap ? kUnitCap : units;
-    float sum = 0.25f * static_cast<float>(seen) + report_share(stars);
-    if (sum > 1.f) {
-        sum = 1.f;
-    }
-    g_clue = sum;
-}
+bool response_full();
+void track_search(uint8_t *wanted);
 
 void on_wanted_update(uint8_t *wanted) {
     if (g_active) {
-        update_clue(wanted);
+        track_search(wanted);
     }
     if (g_wanted_update_orig != nullptr) {
         g_wanted_update_orig(wanted);
     }
 }
 
-// Vanilla car cap, plus one slot that only the probability roll can fill.
-// A full pursuit list stops cars the same way the game does.
-void cop_quota(uint8_t *wanted, int *have, int *cap, int *vanilla) {
+// Room uses the game's police-car maximum plus one. This roll is not entered once
+// that maximum, or the pursuit list, is already full.
+void cop_quota(uint8_t *wanted, int *have, int *cap) {
     *have = 0;
     *cap = 0;
-    *vanilla = 0;
     if (wanted == nullptr || g_host == nullptr) {
         return;
     }
-    const int max_cars = wanted[kMaxCopCars];
-    *vanilla = max_cars;
+    *cap = wanted[kMaxCopCars] + 1;
     auto *count = *reinterpret_cast<int **>(g_host->base + kLawCars);
     if (count != nullptr && *count > 0) {
         *have = *count;
     }
-    const int max_cops = wanted[kMaxPursuit];
-    const int limit = max_cars > 0 ? max_cars + 1 : 1;
-    if (max_cars <= 0 || (max_cops > 0 && wanted[kPursuitCount] >= max_cops)) {
-        *cap = limit;
-        *have = *cap;
-        return;
-    }
-    *cap = limit;
-}
-
-float star_ceiling(int stars) {
-    if (stars < 2) {
-        return 0.f;
-    }
-    if (stars == 2) {
-        return 0.18f;
-    }
-    if (stars == 3) {
-        return 0.24f;
-    }
-    if (stars == 4) {
-        return 0.30f;
-    }
-    if (stars == 5) {
-        return 0.36f;
-    }
-    return 0.42f;
-}
-
-// Clue, stars, and kills each run from 0 to 1. Their sum may pass 1.
-// Only 1 counts, and that maps the next roll's wait from 8s down to 5s.
-uint32_t extra_gap_ms(int stars) {
-    float star_part = static_cast<float>(stars) / 6.f;
-    float kill_part = static_cast<float>(g_cop_kills) / static_cast<float>(kUnitCap);
-    float heat = g_clue + star_part + kill_part;
-    if (heat > 1.f) {
-        heat = 1.f;
-    }
-    return static_cast<uint32_t>((8.f - 3.f * heat) * 1000.f);
-}
-
-bool extra_ready() {
-    if (g_host == nullptr) {
-        return false;
-    }
-    if (g_next_extra_ms == 0) {
-        return true;
-    }
-    return static_cast<int32_t>(game_ms() - g_next_extra_ms) >= 0;
-}
-
-void arm_extra_gap() {
-    if (g_host == nullptr) {
-        return;
-    }
-    using WantedLookup = uint8_t *(*)(int);
-    auto *wanted = reinterpret_cast<WantedLookup>(g_host->base + kFindWanted)(0);
-    const int stars = wanted == nullptr ? 0 : *reinterpret_cast<int *>(wanted + kWantedStars);
-    g_next_extra_ms = game_ms() + extra_gap_ms(stars);
 }
 
 bool police_heli_up();
 
-// A roadblock or a police helicopter makes this roll use a full clue.
-// The meter itself does not gain a share from either of them.
+// A roadblock or a police helicopter is present. Neither one writes the crime record.
 bool response_full() {
     refresh_road_placed();
     return g_road_placed || (g_host != nullptr && police_heli_up());
 }
 
-float roll_chance(int stars, float clue, int have, int vanilla, int cap) {
-    if (cap <= 0 || have >= cap) {
-        return 0.f;
+// A crime report alone uses its weight. A pursuit list, roadblock, or police helicopter
+// uses stars and wanted points instead, and is higher. Both together multiply by a
+// second, smaller stars-and-points term. Full pressure stays under 1.
+float offer_chance(int stars, int points, bool pressed, int have, int cap) {
+    float chance = 0.50f * static_cast<float>(g_report_weight) / 400.f;
+    if (pressed) {
+        if (points > kWantedPointCap) {
+            points = kWantedPointCap;
+        }
+        const float star_part = static_cast<float>(stars) / 6.f;
+        const float point_part = static_cast<float>(points) / static_cast<float>(kWantedPointCap);
+        chance = 0.35f * star_part + 0.35f * point_part;
+        if (g_report_weight > 0) {
+            chance *= 1.f + 0.14f * star_part + 0.14f * point_part;
+        }
     }
     const float room = static_cast<float>(cap - have) / static_cast<float>(cap);
-    const bool bonus = vanilla > 0 && have >= vanilla;
-    const float ceiling = star_ceiling(stars);
-    if (ceiling <= 0.f) {
-        return 0.f;
-    }
-    const float used = response_full() ? 1.f : clue;
-    return bonus ? ceiling * used : ceiling * used * room;
+    return chance * room;
 }
 
 bool special_present(int model) {
@@ -1662,45 +1477,6 @@ bool police_heli_up() {
     return false;
 }
 
-// Kills and stars each run from 0 to 1, then each fills half of the bonus.
-// The bonus stops at 1, so the zone stops at 2.
-float report_zone(int stars) {
-    float kill_part = static_cast<float>(g_cop_kills) / static_cast<float>(kUnitCap);
-    float star_part = static_cast<float>(stars) / 6.f;
-    float added = 0.5f * kill_part + 0.5f * star_part;
-    return 1.f + added;
-}
-
-// The heaviest recorded crime is 400 and, before the zone, fills half the
-// meter. The zone uses the current kills and wanted level.
-float report_share(int stars) {
-    if (g_report_weight <= 0) {
-        return 0.f;
-    }
-    const float base = static_cast<float>(g_report_weight) * (0.50f / 400.f);
-    return base * report_zone(stars);
-}
-
-bool water_roll() {
-    if (!g_active || g_host == nullptr || g_slot_rolled || !extra_ready()) {
-        return false;
-    }
-    using WantedLookup = uint8_t *(*)(int);
-    auto *wanted = reinterpret_cast<WantedLookup>(g_host->base + kFindWanted)(0);
-    const int stars = wanted == nullptr ? 0 : *reinterpret_cast<int *>(wanted + kWantedStars);
-    int cap = 0;
-    int have = 0;
-    int vanilla = 0;
-    cop_quota(wanted, &have, &cap, &vanilla);
-    const float chance = roll_chance(stars, g_clue, have, vanilla, cap);
-    if (chance <= 0.f || static_cast<float>(mix_rand() % 10000) >= chance * 10000.f) {
-        return false;
-    }
-    g_pending_model = 430;
-    __android_log_print(ANDROID_LOG_INFO, kTag, "cop-react water boat");
-    return true;
-}
-
 int pick_extra_model(int stars) {
     int model = default_cop_model();
     int special = 0;
@@ -1712,13 +1488,7 @@ int pick_extra_model(int stars) {
         special = (mix_rand() & 1u) != 0u ? 432 : 433;
     }
     if (special != 0 && (stars >= 5 || !special_present(special))) {
-        float chance = 0.5f + 0.1f * static_cast<float>(g_cop_kills);
-        if (stars > 4) {
-            chance += 0.05f * static_cast<float>(stars - 4);
-        }
-        if (chance > 0.9f) {
-            chance = 0.9f;
-        }
+        const float chance = 0.50f + 0.40f * static_cast<float>(g_report_weight) / 400.f;
         if (static_cast<float>(mix_rand() % 10000) < chance * 10000.f) {
             model = special;
         }
@@ -1736,11 +1506,18 @@ int crime_weight(unsigned crime) {
     return kWeight[crime - 2];
 }
 
+// Heaviest crime while a pursuit list, roadblock, or helicopter is present.
+// After all three are gone the weight stays put, and a later report does not change it.
 void on_report_crime(unsigned crime, uint8_t *ped) {
     if (!g_active || g_host == nullptr || ped == nullptr || crime == 0) {
         return;
     }
     if (*reinterpret_cast<int *>(ped + kPedType) > 1) {
+        return;
+    }
+    using WantedLookup = uint8_t *(*)(int);
+    track_search(reinterpret_cast<WantedLookup>(g_host->base + kFindWanted)(0));
+    if (!g_scene_open) {
         return;
     }
     const int weight = crime_weight(crime);
@@ -1749,11 +1526,65 @@ void on_report_crime(unsigned crime, uint8_t *ped) {
     }
 }
 
-int extra_model() {
-    g_slot_rolled = false;
-    if (!extra_ready()) {
-        return -1;
+// Last player position while any of the pursuit list, a roadblock, or a helicopter
+// is still present. Stars back at zero drop it. A new period starts when one returns.
+void track_search(uint8_t *wanted) {
+    if (wanted == nullptr) {
+        return;
     }
+    if (*reinterpret_cast<int *>(wanted + kWantedStars) <= 0) {
+        g_report_weight = 0;
+        g_search_have = false;
+        g_scene_open = false;
+        return;
+    }
+    const bool live = wanted[kPursuitCount] > 0 || response_full();
+    if (live) {
+        if (!g_scene_open) {
+            g_report_weight = 0;
+            g_scene_open = true;
+        }
+        uint8_t *player = find_player();
+        if (player == nullptr) {
+            return;
+        }
+        const float *pos = entity_pos(player);
+        g_search_x = pos[0];
+        g_search_y = pos[1];
+        g_search_have = true;
+        return;
+    }
+    if (g_scene_open) {
+        g_scene_open = false;
+    }
+}
+
+float search_radius() {
+    auto *root = *reinterpret_cast<uint8_t **>(g_host->base + kCameraRoot);
+    float scale = 1.f;
+    if (root != nullptr) {
+        auto *camera = *reinterpret_cast<uint8_t **>(root);
+        if (camera != nullptr) {
+            auto *generation = *reinterpret_cast<uint8_t **>(camera + 0x170);
+            if (generation != nullptr) {
+                const float value = *reinterpret_cast<float *>(generation + 0x3c4);
+                if (value > 0.f) {
+                    scale = value;
+                }
+            }
+        }
+    }
+    return 170.f * scale;
+}
+
+bool inside_search(float x, float y) {
+    const float radius = search_radius();
+    const float dx = x - g_search_x;
+    const float dy = y - g_search_y;
+    return dx * dx + dy * dy <= radius * radius;
+}
+
+int extra_model(float x, float y, float) {
     g_pending_model = -1;
     if (!g_active || g_host == nullptr) {
         return -1;
@@ -1761,22 +1592,26 @@ int extra_model() {
     prune_cars(g_extra, &g_extra_count, g_extra_model);
     using WantedLookup = uint8_t *(*)(int);
     auto *wanted = reinterpret_cast<WantedLookup>(g_host->base + kFindWanted)(0);
-    if (!response_full() && g_clue <= 0.f) {
+    if (wanted == nullptr) {
         return -1;
     }
-    const int stars = wanted == nullptr ? 0 : *reinterpret_cast<int *>(wanted + kWantedStars);
+    track_search(wanted);
+    const int stars = *reinterpret_cast<int *>(wanted + kWantedStars);
     int cap = 0;
     int have = 0;
-    int vanilla = 0;
-    cop_quota(wanted, &have, &cap, &vanilla);
-    const float chance = roll_chance(stars, g_clue, have, vanilla, cap);
-    g_slot_rolled = true;
-    if (static_cast<float>(mix_rand() % 10000) >= chance * 10000.f) {
+    cop_quota(wanted, &have, &cap);
+    const bool pressed = wanted[kPursuitCount] > 0 || response_full();
+    if (!pressed && (!g_search_have || !inside_search(x, y))) {
         return -1;
     }
-    const int model = pick_extra_model(stars);
-    g_pending_model = model;
-    __android_log_print(ANDROID_LOG_INFO, kTag, "cop-react extra car");
+    const float chance = offer_chance(stars, *reinterpret_cast<int *>(wanted + kWantedPoints), pressed, have, cap);
+    const bool take = chance > 0.f && static_cast<float>(mix_rand() % 10000) < chance * 10000.f;
+    int model = -1;
+    if (take) {
+        model = pick_extra_model(stars);
+        g_pending_model = model;
+        __android_log_print(ANDROID_LOG_INFO, kTag, "cop-react extra car");
+    }
     return model;
 }
 
@@ -1822,7 +1657,6 @@ void note_extra(uint8_t *veh) {
     g_extra[g_extra_count] = veh;
     g_extra_model[g_extra_count] = actual == 430 ? 430 : chosen;
     ++g_extra_count;
-    arm_extra_gap();
 }
 
 uint8_t *build_extra_page() {
@@ -1831,8 +1665,9 @@ uint8_t *build_extra_page() {
         return nullptr;
     }
     const uint32_t decide[] = {
-        0xa9bf7bfdu, 0x580001f0u, 0xd63f0200u, 0x7100001fu, 0x540000ebu, 0x2a0003f4u, 0x528001bbu, 0xb81a03bbu,
-        0xa8c17bfdu, 0x58000130u, 0xd61f0200u, 0xa8c17bfdu, 0xd10183a0u, 0x580000f0u, 0xd61f0200u, 0xd503201fu,
+        0xa9bf7bfdu, 0x1e204100u, 0x1e204121u, 0x1e204162u, 0x580001d0u, 0xd63f0200u, 0x7100001fu, 0x540000ebu,
+        0x2a0003f4u, 0x528001bbu, 0xb81a03bbu, 0xa8c17bfdu, 0x58000110u, 0xd61f0200u, 0xa8c17bfdu, 0xd10183a0u,
+        0x580000d0u, 0xd61f0200u,
     };
     const uint32_t note[] = {
         0xa9be7bfdu, 0x58000170u, 0xd63f0200u, 0xf9000be0u, 0xb4000080u, 0x58000130u, 0xd63f0200u, 0xf9400be0u,
@@ -1850,33 +1685,18 @@ uint8_t *build_extra_page() {
     const uintptr_t choose = g_host->base + kChoosePoliceModel;
     const uintptr_t fix_fn = reinterpret_cast<uintptr_t>(regularize_chase_model);
     const uintptr_t fix_back = g_host->base + kChaseModelNext;
-    const uint32_t water[] = {
-        0x363801d3u, 0x7100377fu, 0x540001c0u, 0xa9bf7bfdu, 0x580001d0u, 0xd63f0200u, 0x340000a0u, 0xa8c17bfdu,
-        0x528001bbu, 0x58000170u, 0xd61f0200u, 0xa8c17bfdu, 0x58000150u, 0xd61f0200u, 0x58000150u, 0xd61f0200u,
-        0x58000150u, 0xd61f0200u,
-    };
-    const uintptr_t water_fn = reinterpret_cast<uintptr_t>(water_roll);
-    const uintptr_t water_cop = g_host->base + kWaterCop;
-    const uintptr_t water_civ = g_host->base + kWaterCiv;
-    const uintptr_t water_land = g_host->base + kWaterLand;
     std::memcpy(page, decide, sizeof(decide));
-    std::memcpy(page + 0x40, &decide_fn, sizeof(decide_fn));
-    std::memcpy(page + 0x48, &police, sizeof(police));
-    std::memcpy(page + 0x50, &next, sizeof(next));
-    std::memcpy(page + 0x60, note, sizeof(note));
-    std::memcpy(page + 0x90, &created, sizeof(created));
-    std::memcpy(page + 0x98, &extra_fn, sizeof(extra_fn));
-    std::memcpy(page + 0xa0, &extra_back, sizeof(extra_back));
-    std::memcpy(page + 0xb0, fix, sizeof(fix));
-    std::memcpy(page + 0xd0, &choose, sizeof(choose));
-    std::memcpy(page + 0xd8, &fix_fn, sizeof(fix_fn));
-    std::memcpy(page + 0xe0, &fix_back, sizeof(fix_back));
-    std::memcpy(page + 0xf0, water, sizeof(water));
-    std::memcpy(page + 0x138, &water_fn, sizeof(water_fn));
-    std::memcpy(page + 0x140, &water_cop, sizeof(water_cop));
-    std::memcpy(page + 0x148, &water_civ, sizeof(water_civ));
-    std::memcpy(page + 0x150, &water_land, sizeof(water_land));
-    std::memcpy(page + 0x158, &water_cop, sizeof(water_cop));
+    std::memcpy(page + 0x48, &decide_fn, sizeof(decide_fn));
+    std::memcpy(page + 0x50, &police, sizeof(police));
+    std::memcpy(page + 0x58, &next, sizeof(next));
+    std::memcpy(page + 0x70, note, sizeof(note));
+    std::memcpy(page + 0xa0, &created, sizeof(created));
+    std::memcpy(page + 0xa8, &extra_fn, sizeof(extra_fn));
+    std::memcpy(page + 0xb0, &extra_back, sizeof(extra_back));
+    std::memcpy(page + 0xc0, fix, sizeof(fix));
+    std::memcpy(page + 0xe0, &choose, sizeof(choose));
+    std::memcpy(page + 0xe8, &fix_fn, sizeof(fix_fn));
+    std::memcpy(page + 0xf0, &fix_back, sizeof(fix_back));
     const uint32_t plain[] = {
         0x5400014du, 0xa9bf7bfdu, 0x58000190u, 0xd63f0200u, 0xa8c17bfdu, 0x7100001fu, 0x540000cdu, 0x2a0003f4u,
         0x2a1f03fbu, 0xb81a03bbu, 0x580000d0u, 0xd61f0200u, 0x580000d0u, 0xd61f0200u,
@@ -1884,11 +1704,11 @@ uint8_t *build_extra_page() {
     const uintptr_t plain_fn = reinterpret_cast<uintptr_t>(civilian_model);
     const uintptr_t plain_keep = g_host->base + kCopClassKeep;
     const uintptr_t plain_drop = g_host->base + kCopClassDrop;
-    std::memcpy(page + 0x170, plain, sizeof(plain));
-    std::memcpy(page + 0x1a8, &plain_fn, sizeof(plain_fn));
-    std::memcpy(page + 0x1b0, &plain_keep, sizeof(plain_keep));
-    std::memcpy(page + 0x1b8, &plain_drop, sizeof(plain_drop));
-    __builtin___clear_cache(reinterpret_cast<char *>(page), reinterpret_cast<char *>(page) + 0x1c0);
+    std::memcpy(page + 0x100, plain, sizeof(plain));
+    std::memcpy(page + 0x138, &plain_fn, sizeof(plain_fn));
+    std::memcpy(page + 0x140, &plain_keep, sizeof(plain_keep));
+    std::memcpy(page + 0x148, &plain_drop, sizeof(plain_drop));
+    __builtin___clear_cache(reinterpret_cast<char *>(page), reinterpret_cast<char *>(page) + 0x150);
     return page;
 }
 
@@ -1907,17 +1727,17 @@ bool set_extra(bool enable) {
     if (g_host == nullptr) {
         return false;
     }
+    const uintptr_t handoff = g_host->base + kSlotHandoff;
     const uintptr_t choose = g_host->base + kChooseModelSite;
     const uintptr_t rand_spawn = g_host->base + kRandCarSpawn;
     const uintptr_t chase_model = g_host->base + kChaseModel;
-    const uintptr_t water = g_host->base + kWaterTest;
     const uintptr_t abort_at = g_host->base + kCopClassAbort;
     if (enable) {
         if (g_extra_page == nullptr) {
-            if (*reinterpret_cast<uint32_t *>(choose) != kChooseModelSub ||
+            if (*reinterpret_cast<uint32_t *>(handoff) != kSlotHandoffMov ||
+                *reinterpret_cast<uint32_t *>(choose) != kChooseModelSub ||
                 *reinterpret_cast<uint32_t *>(rand_spawn) != kRandCarSpawnBl ||
                 *reinterpret_cast<uint32_t *>(chase_model) != kChaseModelBl ||
-                *reinterpret_cast<uint32_t *>(water) != kWaterTbnz ||
                 *reinterpret_cast<uint32_t *>(abort_at) != kCopClassAbortGt) {
                 return false;
             }
@@ -1926,44 +1746,35 @@ bool set_extra(bool enable) {
                 return false;
             }
         }
-        if (!write_branch(choose, g_extra_page)) {
+        if (!write_branch(handoff, g_extra_page)) {
             return false;
         }
-        g_choose_patched = true;
-        if (!write_branch(rand_spawn, g_extra_page + 0x60)) {
-            restore_extra_word(&g_choose_patched, choose, kChooseModelSub);
+        g_slot_patched = true;
+        if (!write_branch(rand_spawn, g_extra_page + 0x70)) {
+            restore_extra_word(&g_slot_patched, handoff, kSlotHandoffMov);
             return false;
         }
         g_rand_spawn_patched = true;
-        if (!write_branch(chase_model, g_extra_page + 0xb0)) {
+        if (!write_branch(chase_model, g_extra_page + 0xc0)) {
             restore_extra_word(&g_rand_spawn_patched, rand_spawn, kRandCarSpawnBl);
-            restore_extra_word(&g_choose_patched, choose, kChooseModelSub);
+            restore_extra_word(&g_slot_patched, handoff, kSlotHandoffMov);
             return false;
         }
         g_chase_model_patched = true;
-        if (!write_branch(water, g_extra_page + 0xf0)) {
+        if (!write_branch(abort_at, g_extra_page + 0x100)) {
             restore_extra_word(&g_chase_model_patched, chase_model, kChaseModelBl);
             restore_extra_word(&g_rand_spawn_patched, rand_spawn, kRandCarSpawnBl);
-            restore_extra_word(&g_choose_patched, choose, kChooseModelSub);
-            return false;
-        }
-        g_water_patched = true;
-        if (!write_branch(abort_at, g_extra_page + 0x170)) {
-            restore_extra_word(&g_water_patched, water, kWaterTbnz);
-            restore_extra_word(&g_chase_model_patched, chase_model, kChaseModelBl);
-            restore_extra_word(&g_rand_spawn_patched, rand_spawn, kRandCarSpawnBl);
-            restore_extra_word(&g_choose_patched, choose, kChooseModelSub);
+            restore_extra_word(&g_slot_patched, handoff, kSlotHandoffMov);
             return false;
         }
         g_abort_patched = true;
         return true;
     }
-    const bool choose_ok = restore_extra_word(&g_choose_patched, choose, kChooseModelSub);
+    const bool slot_ok = restore_extra_word(&g_slot_patched, handoff, kSlotHandoffMov);
     const bool rand_ok = restore_extra_word(&g_rand_spawn_patched, rand_spawn, kRandCarSpawnBl);
     const bool model_ok = restore_extra_word(&g_chase_model_patched, chase_model, kChaseModelBl);
-    const bool water_ok = restore_extra_word(&g_water_patched, water, kWaterTbnz);
     const bool abort_ok = restore_extra_word(&g_abort_patched, abort_at, kCopClassAbortGt);
-    return choose_ok && rand_ok && model_ok && water_ok && abort_ok;
+    return slot_ok && rand_ok && model_ok && abort_ok;
 }
 
 uint8_t *build_road_trigger() {
@@ -2052,12 +1863,11 @@ bool set_crime(bool enable) {
 }
 
 bool set_spawn(bool enable) {
-    const bool slot = exchange_word(enable, kSlotHandoff, kSlotHandoffMov, kSlotHandoffBranch, &g_slot_patched);
     const bool chase = exchange_word(enable, kChaseStars, kChaseStarsCbnz, kNop, &g_chase_patched);
     const bool far = exchange_word(enable, kRefillFar, kRefillFarGe, kRefillFarDrop, &g_refill_far_patched);
     const bool near = exchange_word(enable, kRefillNear, kRefillNearLs, kRefillNearDrop, &g_refill_near_patched);
     const bool full = exchange_word(enable, kRefillFull, kRefillFullGe, kRefillFullDrop, &g_refill_full_patched);
-    return slot && chase && far && near && full;
+    return chase && far && near && full;
 }
 
 uint8_t *build_pursuit_page() {
@@ -2222,20 +2032,7 @@ extern "C" __attribute__((visibility("default"))) void gtasa_plugin_enter(const 
         auto *target = reinterpret_cast<void *>(host->base + kWantedUpdate);
         if (host->hook(target, reinterpret_cast<void *>(on_wanted_update),
                        reinterpret_cast<void **>(&g_wanted_update_orig)) != 0) {
-            __android_log_print(ANDROID_LOG_INFO, kTag, "cop-react clue hook failed");
-        }
-    }
-    if (host != nullptr && host->hook != nullptr && g_damage_orig == nullptr) {
-        auto *target = reinterpret_cast<void *>(host->base + kGenerateDamage);
-        if (host->hook(target, reinterpret_cast<void *>(on_damage), reinterpret_cast<void **>(&g_damage_orig)) != 0) {
-            __android_log_print(ANDROID_LOG_INFO, kTag, "cop-react cop-kill hook failed");
-        }
-    }
-    if (host != nullptr && host->hook != nullptr && g_kill_car_orig == nullptr) {
-        auto *target = reinterpret_cast<void *>(host->base + kKillPedWithCar);
-        if (host->hook(target, reinterpret_cast<void *>(on_kill_car), reinterpret_cast<void **>(&g_kill_car_orig)) !=
-            0) {
-            __android_log_print(ANDROID_LOG_INFO, kTag, "cop-react cop-kill car hook failed");
+            __android_log_print(ANDROID_LOG_INFO, kTag, "cop-react wanted hook failed");
         }
     }
     if (host != nullptr && host->hook != nullptr && g_wanted_orig == nullptr) {
